@@ -1058,6 +1058,7 @@ func New(options *Options) *API {
 			r.Get("/rich-parameters", api.templateVersionRichParameters)
 			r.Get("/external-auth", api.templateVersionExternalAuth)
 			r.Get("/variables", api.templateVersionVariables)
+			r.Get("/presets", api.templateVersionPresets)
 			r.Get("/resources", api.templateVersionResources)
 			r.Get("/logs", api.templateVersionLogs)
 			r.Route("/dry-run", func(r chi.Router) {
@@ -1303,7 +1304,7 @@ func New(options *Options) *API {
 				func(next http.Handler) http.Handler {
 					return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 						if !api.Authorize(r, policy.ActionRead, rbac.ResourceDebugInfo) {
-							httpapi.ResourceNotFound(rw)
+							httpapi.Forbidden(rw)
 							return
 						}
 
@@ -1369,6 +1370,7 @@ func New(options *Options) *API {
 				r.Get("/system", api.systemNotificationTemplates)
 			})
 			r.Get("/dispatch-methods", api.notificationDispatchMethods)
+			r.Post("/test", api.postTestNotification)
 		})
 		r.Route("/tailnet", func(r chi.Router) {
 			r.Use(apiKeyMiddleware)
