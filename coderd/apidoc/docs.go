@@ -6395,6 +6395,38 @@ const docTemplate = `{
             }
         },
         "/users/{user}/appearance": {
+            "get": {
+                "security": [
+                    {
+                        "CoderSessionToken": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Users"
+                ],
+                "summary": "Get user appearance settings",
+                "operationId": "get-user-appearance-settings",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "User ID, name, or me",
+                        "name": "user",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/codersdk.UserAppearanceSettings"
+                        }
+                    }
+                }
+            },
             "put": {
                 "security": [
                     {
@@ -6434,7 +6466,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/codersdk.User"
+                            "$ref": "#/definitions/codersdk.UserAppearanceSettings"
                         }
                     }
                 }
@@ -13699,6 +13731,7 @@ const docTemplate = `{
                 "read",
                 "read_personal",
                 "ssh",
+                "unassign",
                 "update",
                 "update_personal",
                 "use",
@@ -13714,6 +13747,7 @@ const docTemplate = `{
                 "ActionRead",
                 "ActionReadPersonal",
                 "ActionSSH",
+                "ActionUnassign",
                 "ActionUpdate",
                 "ActionUpdatePersonal",
                 "ActionUse",
@@ -13738,6 +13772,7 @@ const docTemplate = `{
                 "group",
                 "group_member",
                 "idpsync_settings",
+                "inbox_notification",
                 "license",
                 "notification_message",
                 "notification_preference",
@@ -13773,6 +13808,7 @@ const docTemplate = `{
                 "ResourceGroup",
                 "ResourceGroupMember",
                 "ResourceIdpsyncSettings",
+                "ResourceInboxNotification",
                 "ResourceLicense",
                 "ResourceNotificationMessage",
                 "ResourceNotificationPreference",
@@ -13853,6 +13889,7 @@ const docTemplate = `{
                     ]
                 },
                 "theme_preference": {
+                    "description": "Deprecated: this value should be retrieved from\n` + "`" + `codersdk.UserPreferenceSettings` + "`" + ` instead.",
                     "type": "string"
                 },
                 "updated_at": {
@@ -14720,6 +14757,7 @@ const docTemplate = `{
                     ]
                 },
                 "theme_preference": {
+                    "description": "Deprecated: this value should be retrieved from\n` + "`" + `codersdk.UserPreferenceSettings` + "`" + ` instead.",
                     "type": "string"
                 },
                 "updated_at": {
@@ -15330,6 +15368,7 @@ const docTemplate = `{
                     ]
                 },
                 "theme_preference": {
+                    "description": "Deprecated: this value should be retrieved from\n` + "`" + `codersdk.UserPreferenceSettings` + "`" + ` instead.",
                     "type": "string"
                 },
                 "updated_at": {
@@ -15399,6 +15438,14 @@ const docTemplate = `{
             "properties": {
                 "report": {
                     "$ref": "#/definitions/codersdk.UserActivityInsightsReport"
+                }
+            }
+        },
+        "codersdk.UserAppearanceSettings": {
+            "type": "object",
+            "properties": {
+                "theme_preference": {
+                    "type": "string"
                 }
             }
         },

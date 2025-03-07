@@ -5104,6 +5104,7 @@ Git clone makes use of this by parsing the URL from: 'Username for "https://gith
 | `read`                |
 | `read_personal`       |
 | `ssh`                 |
+| `unassign`            |
 | `update`              |
 | `update_personal`     |
 | `use`                 |
@@ -5136,6 +5137,7 @@ Git clone makes use of this by parsing the URL from: 'Username for "https://gith
 | `group`                            |
 | `group_member`                     |
 | `idpsync_settings`                 |
+| `inbox_notification`               |
 | `license`                          |
 | `notification_message`             |
 | `notification_preference`          |
@@ -5193,19 +5195,19 @@ Git clone makes use of this by parsing the URL from: 'Username for "https://gith
 
 ### Properties
 
-| Name               | Type                                       | Required | Restrictions | Description |
-|--------------------|--------------------------------------------|----------|--------------|-------------|
-| `avatar_url`       | string                                     | false    |              |             |
-| `created_at`       | string                                     | true     |              |             |
-| `email`            | string                                     | true     |              |             |
-| `id`               | string                                     | true     |              |             |
-| `last_seen_at`     | string                                     | false    |              |             |
-| `login_type`       | [codersdk.LoginType](#codersdklogintype)   | false    |              |             |
-| `name`             | string                                     | false    |              |             |
-| `status`           | [codersdk.UserStatus](#codersdkuserstatus) | false    |              |             |
-| `theme_preference` | string                                     | false    |              |             |
-| `updated_at`       | string                                     | false    |              |             |
-| `username`         | string                                     | true     |              |             |
+| Name               | Type                                       | Required | Restrictions | Description                                                                                |
+|--------------------|--------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------|
+| `avatar_url`       | string                                     | false    |              |                                                                                            |
+| `created_at`       | string                                     | true     |              |                                                                                            |
+| `email`            | string                                     | true     |              |                                                                                            |
+| `id`               | string                                     | true     |              |                                                                                            |
+| `last_seen_at`     | string                                     | false    |              |                                                                                            |
+| `login_type`       | [codersdk.LoginType](#codersdklogintype)   | false    |              |                                                                                            |
+| `name`             | string                                     | false    |              |                                                                                            |
+| `status`           | [codersdk.UserStatus](#codersdkuserstatus) | false    |              |                                                                                            |
+| `theme_preference` | string                                     | false    |              | Deprecated: this value should be retrieved from `codersdk.UserPreferenceSettings` instead. |
+| `updated_at`       | string                                     | false    |              |                                                                                            |
+| `username`         | string                                     | true     |              |                                                                                            |
 
 #### Enumerated Values
 
@@ -6178,22 +6180,22 @@ Restarts will only happen on weekdays in this list on weeks which line up with W
 
 ### Properties
 
-| Name               | Type                                            | Required | Restrictions | Description |
-|--------------------|-------------------------------------------------|----------|--------------|-------------|
-| `avatar_url`       | string                                          | false    |              |             |
-| `created_at`       | string                                          | true     |              |             |
-| `email`            | string                                          | true     |              |             |
-| `id`               | string                                          | true     |              |             |
-| `last_seen_at`     | string                                          | false    |              |             |
-| `login_type`       | [codersdk.LoginType](#codersdklogintype)        | false    |              |             |
-| `name`             | string                                          | false    |              |             |
-| `organization_ids` | array of string                                 | false    |              |             |
-| `role`             | [codersdk.TemplateRole](#codersdktemplaterole)  | false    |              |             |
-| `roles`            | array of [codersdk.SlimRole](#codersdkslimrole) | false    |              |             |
-| `status`           | [codersdk.UserStatus](#codersdkuserstatus)      | false    |              |             |
-| `theme_preference` | string                                          | false    |              |             |
-| `updated_at`       | string                                          | false    |              |             |
-| `username`         | string                                          | true     |              |             |
+| Name               | Type                                            | Required | Restrictions | Description                                                                                |
+|--------------------|-------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------|
+| `avatar_url`       | string                                          | false    |              |                                                                                            |
+| `created_at`       | string                                          | true     |              |                                                                                            |
+| `email`            | string                                          | true     |              |                                                                                            |
+| `id`               | string                                          | true     |              |                                                                                            |
+| `last_seen_at`     | string                                          | false    |              |                                                                                            |
+| `login_type`       | [codersdk.LoginType](#codersdklogintype)        | false    |              |                                                                                            |
+| `name`             | string                                          | false    |              |                                                                                            |
+| `organization_ids` | array of string                                 | false    |              |                                                                                            |
+| `role`             | [codersdk.TemplateRole](#codersdktemplaterole)  | false    |              |                                                                                            |
+| `roles`            | array of [codersdk.SlimRole](#codersdkslimrole) | false    |              |                                                                                            |
+| `status`           | [codersdk.UserStatus](#codersdkuserstatus)      | false    |              |                                                                                            |
+| `theme_preference` | string                                          | false    |              | Deprecated: this value should be retrieved from `codersdk.UserPreferenceSettings` instead. |
+| `updated_at`       | string                                          | false    |              |                                                                                            |
+| `username`         | string                                          | true     |              |                                                                                            |
 
 #### Enumerated Values
 
@@ -6878,21 +6880,21 @@ If the schedule is empty, the user will be updated to use the default schedule.|
 
 ### Properties
 
-| Name               | Type                                            | Required | Restrictions | Description |
-|--------------------|-------------------------------------------------|----------|--------------|-------------|
-| `avatar_url`       | string                                          | false    |              |             |
-| `created_at`       | string                                          | true     |              |             |
-| `email`            | string                                          | true     |              |             |
-| `id`               | string                                          | true     |              |             |
-| `last_seen_at`     | string                                          | false    |              |             |
-| `login_type`       | [codersdk.LoginType](#codersdklogintype)        | false    |              |             |
-| `name`             | string                                          | false    |              |             |
-| `organization_ids` | array of string                                 | false    |              |             |
-| `roles`            | array of [codersdk.SlimRole](#codersdkslimrole) | false    |              |             |
-| `status`           | [codersdk.UserStatus](#codersdkuserstatus)      | false    |              |             |
-| `theme_preference` | string                                          | false    |              |             |
-| `updated_at`       | string                                          | false    |              |             |
-| `username`         | string                                          | true     |              |             |
+| Name               | Type                                            | Required | Restrictions | Description                                                                                |
+|--------------------|-------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------|
+| `avatar_url`       | string                                          | false    |              |                                                                                            |
+| `created_at`       | string                                          | true     |              |                                                                                            |
+| `email`            | string                                          | true     |              |                                                                                            |
+| `id`               | string                                          | true     |              |                                                                                            |
+| `last_seen_at`     | string                                          | false    |              |                                                                                            |
+| `login_type`       | [codersdk.LoginType](#codersdklogintype)        | false    |              |                                                                                            |
+| `name`             | string                                          | false    |              |                                                                                            |
+| `organization_ids` | array of string                                 | false    |              |                                                                                            |
+| `roles`            | array of [codersdk.SlimRole](#codersdkslimrole) | false    |              |                                                                                            |
+| `status`           | [codersdk.UserStatus](#codersdkuserstatus)      | false    |              |                                                                                            |
+| `theme_preference` | string                                          | false    |              | Deprecated: this value should be retrieved from `codersdk.UserPreferenceSettings` instead. |
+| `updated_at`       | string                                          | false    |              |                                                                                            |
+| `username`         | string                                          | true     |              |                                                                                            |
 
 #### Enumerated Values
 
@@ -6987,6 +6989,20 @@ If the schedule is empty, the user will be updated to use the default schedule.|
 | Name     | Type                                                                       | Required | Restrictions | Description |
 |----------|----------------------------------------------------------------------------|----------|--------------|-------------|
 | `report` | [codersdk.UserActivityInsightsReport](#codersdkuseractivityinsightsreport) | false    |              |             |
+
+## codersdk.UserAppearanceSettings
+
+```json
+{
+  "theme_preference": "string"
+}
+```
+
+### Properties
+
+| Name               | Type   | Required | Restrictions | Description |
+|--------------------|--------|----------|--------------|-------------|
+| `theme_preference` | string | false    |              |             |
 
 ## codersdk.UserLatency
 
