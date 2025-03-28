@@ -263,6 +263,7 @@ export interface BuildInfoResponse {
 	readonly provisioner_api_version: string;
 	readonly upgrade_message: string;
 	readonly deployment_id: string;
+	readonly webpush_public_key?: string;
 }
 
 // From codersdk/workspacebuilds.go
@@ -289,6 +290,9 @@ export interface ChangePasswordWithOneTimePasscodeRequest {
 	readonly password: string;
 	readonly one_time_passcode: string;
 }
+
+// From codersdk/client.go
+export const CoderDesktopTelemetryHeader = "Coder-Desktop-Telemetry";
 
 // From codersdk/insights.go
 export interface ConnectionLatency {
@@ -594,6 +598,11 @@ export interface DatabaseReport extends BaseReport {
 	readonly threshold_ms: number;
 }
 
+// From codersdk/notifications.go
+export interface DeleteWebpushSubscription {
+	readonly endpoint: string;
+}
+
 // From codersdk/workspaceagentportshare.go
 export interface DeleteWorkspaceAgentPortShareRequest {
 	readonly agent_name: string;
@@ -742,6 +751,7 @@ export type Experiment =
 	| "auto-fill-parameters"
 	| "example"
 	| "notifications"
+	| "web-push"
 	| "workspace-usage";
 
 // From codersdk/deployment.go
@@ -828,6 +838,18 @@ export interface ExternalAuthUser {
 	readonly profile_url: string;
 	readonly name: string;
 }
+
+// From codersdk/inboxnotification.go
+export const FallbackIconAccount = "DEFAULT_ICON_ACCOUNT";
+
+// From codersdk/inboxnotification.go
+export const FallbackIconOther = "DEFAULT_ICON_OTHER";
+
+// From codersdk/inboxnotification.go
+export const FallbackIconTemplate = "DEFAULT_ICON_TEMPLATE";
+
+// From codersdk/inboxnotification.go
+export const FallbackIconWorkspace = "DEFAULT_ICON_WORKSPACE";
 
 // From codersdk/deployment.go
 export interface Feature {
@@ -1310,6 +1332,7 @@ export interface NotificationsConfig {
 	readonly dispatch_timeout: number;
 	readonly email: NotificationsEmailConfig;
 	readonly webhook: NotificationsWebhookConfig;
+	readonly inbox: NotificationsInboxConfig;
 }
 
 // From codersdk/deployment.go
@@ -1338,6 +1361,11 @@ export interface NotificationsEmailTLSConfig {
 	readonly ca_file: string;
 	readonly cert_file: string;
 	readonly key_file: string;
+}
+
+// From codersdk/deployment.go
+export interface NotificationsInboxConfig {
+	readonly enabled: boolean;
 }
 
 // From codersdk/notifications.go
@@ -1964,6 +1992,7 @@ export type RBACResource =
 	| "tailnet_coordinator"
 	| "template"
 	| "user"
+	| "webpush_subscription"
 	| "*"
 	| "workspace"
 	| "workspace_agent_devcontainers"
@@ -2001,6 +2030,7 @@ export const RBACResources: RBACResource[] = [
 	"tailnet_coordinator",
 	"template",
 	"user",
+	"webpush_subscription",
 	"*",
 	"workspace",
 	"workspace_agent_devcontainers",
@@ -2984,6 +3014,27 @@ export interface VariableValue {
 	readonly value: string;
 }
 
+// From codersdk/notifications.go
+export interface WebpushMessage {
+	readonly icon: string;
+	readonly title: string;
+	readonly body: string;
+	readonly actions: readonly WebpushMessageAction[];
+}
+
+// From codersdk/notifications.go
+export interface WebpushMessageAction {
+	readonly label: string;
+	readonly url: string;
+}
+
+// From codersdk/notifications.go
+export interface WebpushSubscription {
+	readonly endpoint: string;
+	readonly auth_key: string;
+	readonly p256dh_key: string;
+}
+
 // From healthsdk/healthsdk.go
 export interface WebsocketReport extends BaseReport {
 	readonly healthy: boolean;
@@ -3083,6 +3134,7 @@ export interface WorkspaceAgentContainerPort {
 // From codersdk/workspaceagents.go
 export interface WorkspaceAgentDevcontainer {
 	readonly id: string;
+	readonly name: string;
 	readonly workspace_folder: string;
 	readonly config_path?: string;
 }
