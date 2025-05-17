@@ -3,12 +3,16 @@ package prebuilds
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-multierror"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/coder/quartz"
 
@@ -17,11 +21,13 @@ import (
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/provisionerjobs"
 	"github.com/coder/coder/v2/coderd/database/pubsub"
+	"github.com/coder/coder/v2/coderd/notifications"
 	"github.com/coder/coder/v2/coderd/prebuilds"
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
 	"github.com/coder/coder/v2/coderd/wsbuilder"
 	"github.com/coder/coder/v2/codersdk"
+	sdkproto "github.com/coder/coder/v2/provisionersdk/proto"
 
 	"cdr.dev/slog"
 
@@ -31,37 +37,56 @@ import (
 )
 
 type StoreReconciler struct {
-	store  database.Store
-	cfg    codersdk.PrebuildsConfig
-	pubsub pubsub.Pubsub
-	logger slog.Logger
-	clock  quartz.Clock
+	store      database.Store
+	cfg        codersdk.PrebuildsConfig
+	pubsub     pubsub.Pubsub
+	logger     slog.Logger
+	clock      quartz.Clock
+	registerer prometheus.Registerer
+	metrics    *MetricsCollector
+	notifEnq   notifications.Enqueuer
 
-	cancelFn context.CancelCauseFunc
-	stopped  atomic.Bool
-	done     chan struct{}
+	cancelFn          context.CancelCauseFunc
+	running           atomic.Bool
+	stopped           atomic.Bool
+	done              chan struct{}
+	provisionNotifyCh chan database.ProvisionerJob
 }
 
 var _ prebuilds.ReconciliationOrchestrator = &StoreReconciler{}
 
-func NewStoreReconciler(
-	store database.Store,
+func NewStoreReconciler(store database.Store,
 	ps pubsub.Pubsub,
 	cfg codersdk.PrebuildsConfig,
 	logger slog.Logger,
 	clock quartz.Clock,
+	registerer prometheus.Registerer,
+	notifEnq notifications.Enqueuer,
 ) *StoreReconciler {
-	return &StoreReconciler{
-		store:  store,
-		pubsub: ps,
-		logger: logger,
-		cfg:    cfg,
-		clock:  clock,
-		done:   make(chan struct{}, 1),
+	reconciler := &StoreReconciler{
+		store:             store,
+		pubsub:            ps,
+		logger:            logger,
+		cfg:               cfg,
+		clock:             clock,
+		registerer:        registerer,
+		notifEnq:          notifEnq,
+		done:              make(chan struct{}, 1),
+		provisionNotifyCh: make(chan database.ProvisionerJob, 10),
 	}
+
+	if registerer != nil {
+		reconciler.metrics = NewMetricsCollector(store, logger, reconciler)
+		if err := registerer.Register(reconciler.metrics); err != nil {
+			// If the registerer fails to register the metrics collector, it's not fatal.
+			logger.Error(context.Background(), "failed to register prometheus metrics", slog.Error(err))
+		}
+	}
+
+	return reconciler
 }
 
-func (c *StoreReconciler) RunLoop(ctx context.Context) {
+func (c *StoreReconciler) Run(ctx context.Context) {
 	reconciliationInterval := c.cfg.ReconciliationInterval.Value()
 	if reconciliationInterval <= 0 { // avoids a panic
 		reconciliationInterval = 5 * time.Minute
@@ -72,15 +97,54 @@ func (c *StoreReconciler) RunLoop(ctx context.Context) {
 		slog.F("backoff_interval", c.cfg.ReconciliationBackoffInterval.String()),
 		slog.F("backoff_lookback", c.cfg.ReconciliationBackoffLookback.String()))
 
+	var wg sync.WaitGroup
 	ticker := c.clock.NewTicker(reconciliationInterval)
 	defer ticker.Stop()
 	defer func() {
+		wg.Wait()
 		c.done <- struct{}{}
 	}()
 
 	// nolint:gocritic // Reconciliation Loop needs Prebuilds Orchestrator permissions.
 	ctx, cancel := context.WithCancelCause(dbauthz.AsPrebuildsOrchestrator(ctx))
 	c.cancelFn = cancel
+
+	// Start updating metrics in the background.
+	if c.metrics != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.metrics.BackgroundFetch(ctx, metricsUpdateInterval, metricsUpdateTimeout)
+		}()
+	}
+
+	// Everything is in place, reconciler can now be considered as running.
+	//
+	// NOTE: without this atomic bool, Stop might race with Run for the c.cancelFn above.
+	c.running.Store(true)
+
+	// Publish provisioning jobs outside of database transactions.
+	// A connection is held while a database transaction is active; PGPubsub also tries to acquire a new connection on
+	// Publish, so we can exhaust available connections.
+	//
+	// A single worker dequeues from the channel, which should be sufficient.
+	// If any messages are missed due to congestion or errors, provisionerdserver has a backup polling mechanism which
+	// will periodically pick up any queued jobs (see poll(time.Duration) in coderd/provisionerdserver/acquirer.go).
+	go func() {
+		for {
+			select {
+			case <-c.done:
+				return
+			case <-ctx.Done():
+				return
+			case job := <-c.provisionNotifyCh:
+				err := provisionerjobs.PostJob(c.pubsub, job)
+				if err != nil {
+					c.logger.Error(ctx, "failed to post provisioner job to pubsub", slog.Error(err))
+				}
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -107,16 +171,37 @@ func (c *StoreReconciler) RunLoop(ctx context.Context) {
 }
 
 func (c *StoreReconciler) Stop(ctx context.Context, cause error) {
+	defer c.running.Store(false)
+
 	if cause != nil {
 		c.logger.Error(context.Background(), "stopping reconciler due to an error", slog.Error(cause))
 	} else {
 		c.logger.Info(context.Background(), "gracefully stopping reconciler")
 	}
 
-	if c.isStopped() {
+	// If previously stopped (Swap returns previous value), then short-circuit.
+	//
+	// NOTE: we need to *prospectively* mark this as stopped to prevent Stop being called multiple times and causing problems.
+	if c.stopped.Swap(true) {
 		return
 	}
-	c.stopped.Store(true)
+
+	// Unregister the metrics collector.
+	if c.metrics != nil && c.registerer != nil {
+		if !c.registerer.Unregister(c.metrics) {
+			// The API doesn't allow us to know why the de-registration failed, but it's not very consequential.
+			// The only time this would be an issue is if the premium license is removed, leading to the feature being
+			// disabled (and consequently this Stop method being called), and then adding a new license which enables the
+			// feature again. If the metrics cannot be registered, it'll log an error from NewStoreReconciler.
+			c.logger.Warn(context.Background(), "failed to unregister metrics collector")
+		}
+	}
+
+	// If the reconciler is not running, there's nothing else to do.
+	if !c.running.Load() {
+		return
+	}
+
 	if c.cancelFn != nil {
 		c.cancelFn(cause)
 	}
@@ -136,10 +221,6 @@ func (c *StoreReconciler) Stop(ctx context.Context, cause error) {
 	case <-c.done:
 		c.logger.Info(context.Background(), "reconciler stopped")
 	}
-}
-
-func (c *StoreReconciler) isStopped() bool {
-	return c.stopped.Load()
 }
 
 // ReconcileAll will attempt to resolve the desired vs actual state of all templates which have presets with prebuilds configured.
@@ -272,6 +353,15 @@ func (c *StoreReconciler) ReconcilePreset(ctx context.Context, ps prebuilds.Pres
 	actions, err := c.CalculateActions(ctx, ps)
 	if err != nil {
 		logger.Error(ctx, "failed to calculate actions for preset", slog.Error(err), slog.F("preset_id", ps.Preset.ID))
+		return nil
+	}
+
+	// Nothing has to be done.
+	if !ps.Preset.UsingActiveVersion && actions.IsNoop() {
+		logger.Debug(ctx, "skipping reconciliation for preset - nothing has to be done",
+			slog.F("template_id", ps.Preset.TemplateID.String()), slog.F("template_name", ps.Preset.TemplateName),
+			slog.F("template_version_id", ps.Preset.TemplateVersionID.String()), slog.F("template_version_name", ps.Preset.TemplateVersionName),
+			slog.F("preset_id", ps.Preset.ID.String()), slog.F("preset_name", ps.Preset.Name))
 		return nil
 	}
 
@@ -505,13 +595,18 @@ func (c *StoreReconciler) provision(
 	builder := wsbuilder.New(workspace, transition).
 		Reason(database.BuildReasonInitiator).
 		Initiator(prebuilds.SystemUserID).
-		VersionID(template.ActiveVersionID).
-		MarkPrebuild().
-		TemplateVersionPresetID(presetID)
+		MarkPrebuild()
 
-	// We only inject the required params when the prebuild is being created.
-	// This mirrors the behavior of regular workspace deletion (see cli/delete.go).
 	if transition != database.WorkspaceTransitionDelete {
+		// We don't specify the version for a delete transition,
+		// because the prebuilt workspace may have been created using an older template version.
+		// If the version isn't explicitly set, the builder will automatically use the version
+		// from the last workspace build — which is the desired behavior.
+		builder = builder.VersionID(template.ActiveVersionID)
+
+		// We only inject the required params when the prebuild is being created.
+		// This mirrors the behavior of regular workspace deletion (see cli/delete.go).
+		builder = builder.TemplateVersionPresetID(presetID)
 		builder = builder.RichParameterValues(params)
 	}
 
@@ -527,10 +622,16 @@ func (c *StoreReconciler) provision(
 		return xerrors.Errorf("provision workspace: %w", err)
 	}
 
-	err = provisionerjobs.PostJob(c.pubsub, *provisionerJob)
-	if err != nil {
-		// Client probably doesn't care about this error, so just log it.
-		c.logger.Error(ctx, "failed to post provisioner job to pubsub", slog.Error(err))
+	if provisionerJob == nil {
+		return nil
+	}
+
+	// Publish provisioner job event outside of transaction.
+	select {
+	case c.provisionNotifyCh <- *provisionerJob:
+	default: // channel full, drop the message; provisioner will pick this job up later with its periodic check, though.
+		c.logger.Warn(ctx, "provisioner job notification queue full, dropping",
+			slog.F("job_id", provisionerJob.ID), slog.F("prebuild_id", prebuildID.String()))
 	}
 
 	c.logger.Info(ctx, "prebuild job scheduled", slog.F("transition", transition),
@@ -538,4 +639,125 @@ func (c *StoreReconciler) provision(
 		slog.F("job_id", provisionerJob.ID))
 
 	return nil
+}
+
+// ForceMetricsUpdate forces the metrics collector, if defined, to update its state (we cache the metrics state to
+// reduce load on the database).
+func (c *StoreReconciler) ForceMetricsUpdate(ctx context.Context) error {
+	if c.metrics == nil {
+		return nil
+	}
+
+	return c.metrics.UpdateState(ctx, time.Second*10)
+}
+
+func (c *StoreReconciler) TrackResourceReplacement(ctx context.Context, workspaceID, buildID uuid.UUID, replacements []*sdkproto.ResourceReplacement) {
+	// nolint:gocritic // Necessary to query all the required data.
+	ctx = dbauthz.AsSystemRestricted(ctx)
+	// Since this may be called in a fire-and-forget fashion, we need to give up at some point.
+	trackCtx, trackCancel := context.WithTimeout(ctx, time.Minute)
+	defer trackCancel()
+
+	if err := c.trackResourceReplacement(trackCtx, workspaceID, buildID, replacements); err != nil {
+		c.logger.Error(ctx, "failed to track resource replacement", slog.Error(err))
+	}
+}
+
+// nolint:revive // Shut up it's fine.
+func (c *StoreReconciler) trackResourceReplacement(ctx context.Context, workspaceID, buildID uuid.UUID, replacements []*sdkproto.ResourceReplacement) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	workspace, err := c.store.GetWorkspaceByID(ctx, workspaceID)
+	if err != nil {
+		return xerrors.Errorf("fetch workspace %q: %w", workspaceID.String(), err)
+	}
+
+	build, err := c.store.GetWorkspaceBuildByID(ctx, buildID)
+	if err != nil {
+		return xerrors.Errorf("fetch workspace build %q: %w", buildID.String(), err)
+	}
+
+	// The first build will always be the prebuild.
+	prebuild, err := c.store.GetWorkspaceBuildByWorkspaceIDAndBuildNumber(ctx, database.GetWorkspaceBuildByWorkspaceIDAndBuildNumberParams{
+		WorkspaceID: workspaceID, BuildNumber: 1,
+	})
+	if err != nil {
+		return xerrors.Errorf("fetch prebuild: %w", err)
+	}
+
+	// This should not be possible, but defend against it.
+	if !prebuild.TemplateVersionPresetID.Valid || prebuild.TemplateVersionPresetID.UUID == uuid.Nil {
+		return xerrors.Errorf("no preset used in prebuild for workspace %q", workspaceID.String())
+	}
+
+	prebuildPreset, err := c.store.GetPresetByID(ctx, prebuild.TemplateVersionPresetID.UUID)
+	if err != nil {
+		return xerrors.Errorf("fetch template preset for template version ID %q: %w", prebuild.TemplateVersionID.String(), err)
+	}
+
+	claimant, err := c.store.GetUserByID(ctx, workspace.OwnerID) // At this point, the workspace is owned by the new owner.
+	if err != nil {
+		return xerrors.Errorf("fetch claimant %q: %w", workspace.OwnerID.String(), err)
+	}
+
+	// Use the claiming build here (not prebuild) because both should be equivalent, and we might as well spot inconsistencies now.
+	templateVersion, err := c.store.GetTemplateVersionByID(ctx, build.TemplateVersionID)
+	if err != nil {
+		return xerrors.Errorf("fetch template version %q: %w", build.TemplateVersionID.String(), err)
+	}
+
+	org, err := c.store.GetOrganizationByID(ctx, workspace.OrganizationID)
+	if err != nil {
+		return xerrors.Errorf("fetch org %q: %w", workspace.OrganizationID.String(), err)
+	}
+
+	// Track resource replacement in Prometheus metric.
+	if c.metrics != nil {
+		c.metrics.trackResourceReplacement(org.Name, workspace.TemplateName, prebuildPreset.Name)
+	}
+
+	// Send notification to template admins.
+	if c.notifEnq == nil {
+		c.logger.Warn(ctx, "notification enqueuer not set, cannot send resource replacement notification(s)")
+		return nil
+	}
+
+	repls := make(map[string]string, len(replacements))
+	for _, repl := range replacements {
+		repls[repl.GetResource()] = strings.Join(repl.GetPaths(), ", ")
+	}
+
+	templateAdmins, err := c.store.GetUsers(ctx, database.GetUsersParams{
+		RbacRole: []string{codersdk.RoleTemplateAdmin},
+	})
+	if err != nil {
+		return xerrors.Errorf("fetch template admins: %w", err)
+	}
+
+	var notifErr error
+	for _, templateAdmin := range templateAdmins {
+		if _, err := c.notifEnq.EnqueueWithData(ctx, templateAdmin.ID, notifications.TemplateWorkspaceResourceReplaced,
+			map[string]string{
+				"org":                 org.Name,
+				"workspace":           workspace.Name,
+				"template":            workspace.TemplateName,
+				"template_version":    templateVersion.Name,
+				"preset":              prebuildPreset.Name,
+				"workspace_build_num": fmt.Sprintf("%d", build.BuildNumber),
+				"claimant":            claimant.Username,
+			},
+			map[string]any{
+				"replacements": repls,
+			}, "prebuilds_reconciler",
+			// Associate this notification with all the related entities.
+			workspace.ID, workspace.OwnerID, workspace.TemplateID, templateVersion.ID, prebuildPreset.ID, workspace.OrganizationID,
+		); err != nil {
+			notifErr = errors.Join(xerrors.Errorf("send notification to %q: %w", templateAdmin.ID.String(), err))
+			continue
+		}
+	}
+
+	return notifErr
 }

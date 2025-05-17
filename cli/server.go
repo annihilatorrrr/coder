@@ -61,10 +61,12 @@ import (
 	"github.com/coder/serpent"
 	"github.com/coder/wgtunnel/tunnelsdk"
 
+	"github.com/coder/coder/v2/coderd/ai"
 	"github.com/coder/coder/v2/coderd/entitlements"
 	"github.com/coder/coder/v2/coderd/notifications/reports"
 	"github.com/coder/coder/v2/coderd/runtimeconfig"
 	"github.com/coder/coder/v2/coderd/webpush"
+	"github.com/coder/coder/v2/codersdk/drpcsdk"
 
 	"github.com/coder/coder/v2/buildinfo"
 	"github.com/coder/coder/v2/cli/clilog"
@@ -101,7 +103,6 @@ import (
 	"github.com/coder/coder/v2/coderd/workspaceapps/appurl"
 	"github.com/coder/coder/v2/coderd/workspacestats"
 	"github.com/coder/coder/v2/codersdk"
-	"github.com/coder/coder/v2/codersdk/drpc"
 	"github.com/coder/coder/v2/cryptorand"
 	"github.com/coder/coder/v2/provisioner/echo"
 	"github.com/coder/coder/v2/provisioner/terraform"
@@ -610,6 +611,22 @@ func (r *RootCmd) Server(newAPI func(context.Context, *coderd.Options) (*coderd.
 				)
 			}
 
+			aiProviders, err := ReadAIProvidersFromEnv(os.Environ())
+			if err != nil {
+				return xerrors.Errorf("read ai providers from env: %w", err)
+			}
+			vals.AI.Value.Providers = append(vals.AI.Value.Providers, aiProviders...)
+			for _, provider := range aiProviders {
+				logger.Debug(
+					ctx, "loaded ai provider",
+					slog.F("type", provider.Type),
+				)
+			}
+			languageModels, err := ai.ModelsFromConfig(ctx, vals.AI.Value.Providers)
+			if err != nil {
+				return xerrors.Errorf("create language models: %w", err)
+			}
+
 			realIPConfig, err := httpmw.ParseRealIPConfig(vals.ProxyTrustedHeaders, vals.ProxyTrustedOrigins)
 			if err != nil {
 				return xerrors.Errorf("parse real ip config: %w", err)
@@ -640,6 +657,7 @@ func (r *RootCmd) Server(newAPI func(context.Context, *coderd.Options) (*coderd.
 				CacheDir:                    cacheDir,
 				GoogleTokenValidator:        googleTokenValidator,
 				ExternalAuthConfigs:         externalAuthConfigs,
+				LanguageModels:              languageModels,
 				RealIPConfig:                realIPConfig,
 				SSHKeygenAlgorithm:          sshKeygenAlgorithm,
 				TracerProvider:              tracerProvider,
@@ -738,6 +756,15 @@ func (r *RootCmd) Server(newAPI func(context.Context, *coderd.Options) (*coderd.
 				defer func() {
 					_ = sqlDB.Close()
 				}()
+
+				if options.DeploymentValues.Prometheus.Enable {
+					// At this stage we don't think the database name serves much purpose in these metrics.
+					// It requires parsing the DSN to determine it, which requires pulling in another dependency
+					// (i.e. https://github.com/jackc/pgx), but it's rather heavy.
+					// The conn string (https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNSTRING) can
+					// take different forms, which make parsing non-trivial.
+					options.PrometheusRegistry.MustRegister(collectors.NewDBStatsCollector(sqlDB, ""))
+				}
 
 				options.Database = database.New(sqlDB)
 				ps, err := pubsub.New(ctx, logger.Named("pubsub"), sqlDB, dbURL)
@@ -901,6 +928,37 @@ func (r *RootCmd) Server(newAPI func(context.Context, *coderd.Options) (*coderd.
 			options.StatsBatcher = batcher
 			defer closeBatcher()
 
+			// Manage notifications.
+			var (
+				notificationsCfg     = options.DeploymentValues.Notifications
+				notificationsManager *notifications.Manager
+			)
+
+			metrics := notifications.NewMetrics(options.PrometheusRegistry)
+			helpers := templateHelpers(options)
+
+			// The enqueuer is responsible for enqueueing notifications to the given store.
+			enqueuer, err := notifications.NewStoreEnqueuer(notificationsCfg, options.Database, helpers, logger.Named("notifications.enqueuer"), quartz.NewReal())
+			if err != nil {
+				return xerrors.Errorf("failed to instantiate notification store enqueuer: %w", err)
+			}
+			options.NotificationsEnqueuer = enqueuer
+
+			// The notification manager is responsible for:
+			//   - creating notifiers and managing their lifecycles (notifiers are responsible for dequeueing/sending notifications)
+			//   - keeping the store updated with status updates
+			notificationsManager, err = notifications.NewManager(notificationsCfg, options.Database, options.Pubsub, helpers, metrics, logger.Named("notifications.manager"))
+			if err != nil {
+				return xerrors.Errorf("failed to instantiate notification manager: %w", err)
+			}
+
+			// nolint:gocritic // We need to run the manager in a notifier context.
+			notificationsManager.Run(dbauthz.AsNotifier(ctx))
+
+			// Run report generator to distribute periodic reports.
+			notificationReportGenerator := reports.NewReportGenerator(ctx, logger.Named("notifications.report_generator"), options.Database, options.NotificationsEnqueuer, quartz.NewReal())
+			defer notificationReportGenerator.Close()
+
 			// We use a separate coderAPICloser so the Enterprise API
 			// can have its own close functions. This is cleaner
 			// than abstracting the Coder API itself.
@@ -947,37 +1005,6 @@ func (r *RootCmd) Server(newAPI func(context.Context, *coderd.Options) (*coderd.
 			if err != nil && flag.Lookup("test.v") != nil {
 				return xerrors.Errorf("write config url: %w", err)
 			}
-
-			// Manage notifications.
-			var (
-				notificationsCfg     = options.DeploymentValues.Notifications
-				notificationsManager *notifications.Manager
-			)
-
-			metrics := notifications.NewMetrics(options.PrometheusRegistry)
-			helpers := templateHelpers(options)
-
-			// The enqueuer is responsible for enqueueing notifications to the given store.
-			enqueuer, err := notifications.NewStoreEnqueuer(notificationsCfg, options.Database, helpers, logger.Named("notifications.enqueuer"), quartz.NewReal())
-			if err != nil {
-				return xerrors.Errorf("failed to instantiate notification store enqueuer: %w", err)
-			}
-			options.NotificationsEnqueuer = enqueuer
-
-			// The notification manager is responsible for:
-			//   - creating notifiers and managing their lifecycles (notifiers are responsible for dequeueing/sending notifications)
-			//   - keeping the store updated with status updates
-			notificationsManager, err = notifications.NewManager(notificationsCfg, options.Database, options.Pubsub, helpers, metrics, logger.Named("notifications.manager"))
-			if err != nil {
-				return xerrors.Errorf("failed to instantiate notification manager: %w", err)
-			}
-
-			// nolint:gocritic // We need to run the manager in a notifier context.
-			notificationsManager.Run(dbauthz.AsNotifier(ctx))
-
-			// Run report generator to distribute periodic reports.
-			notificationReportGenerator := reports.NewReportGenerator(ctx, logger.Named("notifications.report_generator"), options.Database, options.NotificationsEnqueuer, quartz.NewReal())
-			defer notificationReportGenerator.Close()
 
 			// Since errCh only has one buffered slot, all routines
 			// sending on it must be wrapped in a select/default to
@@ -1420,7 +1447,7 @@ func newProvisionerDaemon(
 	for _, provisionerType := range provisionerTypes {
 		switch provisionerType {
 		case codersdk.ProvisionerTypeEcho:
-			echoClient, echoServer := drpc.MemTransportPipe()
+			echoClient, echoServer := drpcsdk.MemTransportPipe()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -1454,7 +1481,7 @@ func newProvisionerDaemon(
 			}
 
 			tracer := coderAPI.TracerProvider.Tracer(tracing.TracerName)
-			terraformClient, terraformServer := drpc.MemTransportPipe()
+			terraformClient, terraformServer := drpcsdk.MemTransportPipe()
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
@@ -2610,6 +2637,77 @@ func redirectHTTPToHTTPSDeprecation(ctx context.Context, logger slog.Logger, inv
 		logger.Warn(ctx, "⚠️ --tls-redirect-http-to-https is deprecated, please use --redirect-to-access-url instead")
 		cfg.RedirectToAccessURL = cfg.TLS.RedirectHTTP
 	}
+}
+
+func ReadAIProvidersFromEnv(environ []string) ([]codersdk.AIProviderConfig, error) {
+	// The index numbers must be in-order.
+	sort.Strings(environ)
+
+	var providers []codersdk.AIProviderConfig
+	for _, v := range serpent.ParseEnviron(environ, "CODER_AI_PROVIDER_") {
+		tokens := strings.SplitN(v.Name, "_", 2)
+		if len(tokens) != 2 {
+			return nil, xerrors.Errorf("invalid env var: %s", v.Name)
+		}
+
+		providerNum, err := strconv.Atoi(tokens[0])
+		if err != nil {
+			return nil, xerrors.Errorf("parse number: %s", v.Name)
+		}
+
+		var provider codersdk.AIProviderConfig
+		switch {
+		case len(providers) < providerNum:
+			return nil, xerrors.Errorf(
+				"provider num %v skipped: %s",
+				len(providers),
+				v.Name,
+			)
+		case len(providers) == providerNum:
+			// At the next next provider.
+			providers = append(providers, provider)
+		case len(providers) == providerNum+1:
+			// At the current provider.
+			provider = providers[providerNum]
+		}
+
+		key := tokens[1]
+		switch key {
+		case "TYPE":
+			provider.Type = v.Value
+		case "API_KEY":
+			provider.APIKey = v.Value
+		case "BASE_URL":
+			provider.BaseURL = v.Value
+		case "MODELS":
+			provider.Models = strings.Split(v.Value, ",")
+		}
+		providers[providerNum] = provider
+	}
+	for _, envVar := range environ {
+		tokens := strings.SplitN(envVar, "=", 2)
+		if len(tokens) != 2 {
+			continue
+		}
+		switch tokens[0] {
+		case "OPENAI_API_KEY":
+			providers = append(providers, codersdk.AIProviderConfig{
+				Type:   "openai",
+				APIKey: tokens[1],
+			})
+		case "ANTHROPIC_API_KEY":
+			providers = append(providers, codersdk.AIProviderConfig{
+				Type:   "anthropic",
+				APIKey: tokens[1],
+			})
+		case "GOOGLE_API_KEY":
+			providers = append(providers, codersdk.AIProviderConfig{
+				Type:   "google",
+				APIKey: tokens[1],
+			})
+		}
+	}
+	return providers, nil
 }
 
 // ReadExternalAuthProvidersFromEnv is provided for compatibility purposes with

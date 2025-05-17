@@ -42,6 +42,7 @@ type agentAttributes struct {
 	Directory       string            `mapstructure:"dir"`
 	ID              string            `mapstructure:"id"`
 	Token           string            `mapstructure:"token"`
+	APIKeyScope     string            `mapstructure:"api_key_scope"`
 	Env             map[string]string `mapstructure:"env"`
 	// Deprecated: but remains here for backwards compatibility.
 	StartupScript                string `mapstructure:"startup_script"`
@@ -319,12 +320,13 @@ func ConvertState(ctx context.Context, modules []*tfjson.StateModule, rawGraph s
 				Metadata:                 metadata,
 				DisplayApps:              displayApps,
 				Order:                    attrs.Order,
+				ApiKeyScope:              attrs.APIKeyScope,
 			}
 			// Support the legacy script attributes in the agent!
 			if attrs.StartupScript != "" {
 				agent.Scripts = append(agent.Scripts, &proto.Script{
 					// This is ▶️
-					Icon:             "/emojis/25b6.png",
+					Icon:             "/emojis/25b6-fe0f.png",
 					LogPath:          "coder-startup-script.log",
 					DisplayName:      "Startup Script",
 					Script:           attrs.StartupScript,
@@ -394,7 +396,7 @@ func ConvertState(ctx context.Context, modules []*tfjson.StateModule, rawGraph s
 
 			agents, exists := resourceAgents[agentResource.Label]
 			if !exists {
-				agents = make([]*proto.Agent, 0)
+				agents = make([]*proto.Agent, 0, 1)
 			}
 			agents = append(agents, agent)
 			resourceAgents[agentResource.Label] = agents
@@ -749,13 +751,17 @@ func ConvertState(ctx context.Context, modules []*tfjson.StateModule, rawGraph s
 		if err != nil {
 			return nil, xerrors.Errorf("decode map values for coder_parameter.%s: %w", resource.Name, err)
 		}
+		var defaultVal string
+		if param.Default != nil {
+			defaultVal = *param.Default
+		}
 		protoParam := &proto.RichParameter{
 			Name:         param.Name,
 			DisplayName:  param.DisplayName,
 			Description:  param.Description,
 			Type:         param.Type,
 			Mutable:      param.Mutable,
-			DefaultValue: param.Default,
+			DefaultValue: defaultVal,
 			Icon:         param.Icon,
 			Required:     !param.Optional,
 			// #nosec G115 - Safe conversion as parameter order value is expected to be within int32 range

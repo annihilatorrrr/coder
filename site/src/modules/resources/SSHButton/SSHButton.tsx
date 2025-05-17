@@ -1,6 +1,5 @@
 import type { Interpolation, Theme } from "@emotion/react";
-import KeyboardArrowDown from "@mui/icons-material/KeyboardArrowDown";
-import Button from "@mui/material/Button";
+import { Button } from "components/Button/Button";
 import { CodeExample } from "components/CodeExample/CodeExample";
 import {
 	HelpTooltipLink,
@@ -14,6 +13,7 @@ import {
 	PopoverTrigger,
 } from "components/deprecated/Popover/Popover";
 import { type ClassName, useClassName } from "hooks/useClassName";
+import { ChevronDownIcon } from "lucide-react";
 import type { FC } from "react";
 import { docs } from "utils/docs";
 
@@ -34,12 +34,12 @@ export const AgentSSHButton: FC<AgentSSHButtonProps> = ({
 		<Popover>
 			<PopoverTrigger>
 				<Button
-					size="small"
-					variant="text"
-					endIcon={<KeyboardArrowDown />}
+					size="sm"
+					variant="subtle"
 					css={{ fontSize: 13, padding: "8px 12px" }}
 				>
 					Connect via SSH
+					<ChevronDownIcon className="size-4 ml-2" />
 				</Button>
 			</PopoverTrigger>
 
@@ -96,12 +96,12 @@ export const AgentDevcontainerSSHButton: FC<
 		<Popover>
 			<PopoverTrigger>
 				<Button
-					size="small"
-					variant="text"
-					endIcon={<KeyboardArrowDown />}
+					size="sm"
+					variant="subtle"
 					css={{ fontSize: 13, padding: "8px 12px" }}
 				>
 					Connect via SSH
+					<ChevronDownIcon className="size-4 ml-2" />
 				</Button>
 			</PopoverTrigger>
 

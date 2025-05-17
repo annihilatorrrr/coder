@@ -1,4 +1,3 @@
-import GroupAdd from "@mui/icons-material/GroupAddOutlined";
 import { getErrorMessage } from "api/errors";
 import { groupsByOrganization } from "api/queries/groups";
 import { organizationsPermissions } from "api/queries/organizations";
@@ -12,6 +11,7 @@ import {
 	SettingsHeaderTitle,
 } from "components/SettingsHeader/SettingsHeader";
 import { Stack } from "components/Stack/Stack";
+import { PlusIcon } from "lucide-react";
 import { useFeatureVisibility } from "modules/dashboard/useFeatureVisibility";
 import { RequirePermission } from "modules/permissions/RequirePermission";
 import { type FC, useEffect } from "react";
@@ -20,9 +20,9 @@ import { useQuery } from "react-query";
 import { Link as RouterLink } from "react-router-dom";
 import { pageTitle } from "utils/page";
 import { useGroupsSettings } from "./GroupsPageProvider";
-import GroupsPageView from "./GroupsPageView";
+import { GroupsPageView } from "./GroupsPageView";
 
-export const GroupsPage: FC = () => {
+const GroupsPage: FC = () => {
 	const { template_rbac: groupsEnabled } = useFeatureVisibility();
 	const { organization, showOrganizations } = useGroupsSettings();
 	const groupsQuery = useQuery(
@@ -95,7 +95,7 @@ export const GroupsPage: FC = () => {
 				{groupsEnabled && permissions.createGroup && (
 					<Button asChild>
 						<RouterLink to="create">
-							<GroupAdd />
+							<PlusIcon className="size-icon-sm" />
 							Create group
 						</RouterLink>
 					</Button>

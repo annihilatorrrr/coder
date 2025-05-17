@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -35,7 +36,6 @@ import (
 	"github.com/coder/coder/v2/agent"
 	"github.com/coder/coder/v2/agent/agentcontainers"
 	"github.com/coder/coder/v2/agent/agentcontainers/acmock"
-	"github.com/coder/coder/v2/agent/agentexec"
 	"github.com/coder/coder/v2/agent/agenttest"
 	agentproto "github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/coderdtest"
@@ -45,10 +45,12 @@ import (
 	"github.com/coder/coder/v2/coderd/database/dbfake"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
 	"github.com/coder/coder/v2/coderd/database/dbmem"
+	"github.com/coder/coder/v2/coderd/database/dbtestutil"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/database/pubsub"
 	"github.com/coder/coder/v2/coderd/externalauth"
 	"github.com/coder/coder/v2/coderd/jwtutils"
+	"github.com/coder/coder/v2/coderd/prebuilds"
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/telemetry"
 	"github.com/coder/coder/v2/coderd/util/ptr"
@@ -341,27 +343,27 @@ func TestWorkspaceAgentLogs(t *testing.T) {
 
 func TestWorkspaceAgentAppStatus(t *testing.T) {
 	t.Parallel()
+	client, db := coderdtest.NewWithDatabase(t, nil)
+	user := coderdtest.CreateFirstUser(t, client)
+	client, user2 := coderdtest.CreateAnotherUser(t, client, user.OrganizationID)
+
+	r := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+		OrganizationID: user.OrganizationID,
+		OwnerID:        user2.ID,
+	}).WithAgent(func(a []*proto.Agent) []*proto.Agent {
+		a[0].Apps = []*proto.App{
+			{
+				Slug: "vscode",
+			},
+		}
+		return a
+	}).Do()
+
+	agentClient := agentsdk.New(client.URL)
+	agentClient.SetSessionToken(r.AgentToken)
 	t.Run("Success", func(t *testing.T) {
 		t.Parallel()
-		ctx := testutil.Context(t, testutil.WaitMedium)
-		client, db := coderdtest.NewWithDatabase(t, nil)
-		user := coderdtest.CreateFirstUser(t, client)
-		client, user2 := coderdtest.CreateAnotherUser(t, client, user.OrganizationID)
-
-		r := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
-			OrganizationID: user.OrganizationID,
-			OwnerID:        user2.ID,
-		}).WithAgent(func(a []*proto.Agent) []*proto.Agent {
-			a[0].Apps = []*proto.App{
-				{
-					Slug: "vscode",
-				},
-			}
-			return a
-		}).Do()
-
-		agentClient := agentsdk.New(client.URL)
-		agentClient.SetSessionToken(r.AgentToken)
+		ctx := testutil.Context(t, testutil.WaitShort)
 		err := agentClient.PatchAppStatus(ctx, agentsdk.PatchAppStatus{
 			AppSlug: "vscode",
 			Message: "testing",
@@ -381,6 +383,51 @@ func TestWorkspaceAgentAppStatus(t *testing.T) {
 		// Deprecated fields should be ignored.
 		require.Empty(t, agent.Apps[0].Statuses[0].Icon)
 		require.False(t, agent.Apps[0].Statuses[0].NeedsUserAttention)
+	})
+
+	t.Run("FailUnknownApp", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitShort)
+		err := agentClient.PatchAppStatus(ctx, agentsdk.PatchAppStatus{
+			AppSlug: "unknown",
+			Message: "testing",
+			URI:     "https://example.com",
+			State:   codersdk.WorkspaceAppStatusStateComplete,
+		})
+		require.ErrorContains(t, err, "No app found with slug")
+		var sdkErr *codersdk.Error
+		require.ErrorAs(t, err, &sdkErr)
+		require.Equal(t, http.StatusBadRequest, sdkErr.StatusCode())
+	})
+
+	t.Run("FailUnknownState", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitShort)
+		err := agentClient.PatchAppStatus(ctx, agentsdk.PatchAppStatus{
+			AppSlug: "vscode",
+			Message: "testing",
+			URI:     "https://example.com",
+			State:   "unknown",
+		})
+		require.ErrorContains(t, err, "Invalid state")
+		var sdkErr *codersdk.Error
+		require.ErrorAs(t, err, &sdkErr)
+		require.Equal(t, http.StatusBadRequest, sdkErr.StatusCode())
+	})
+
+	t.Run("FailTooLong", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitShort)
+		err := agentClient.PatchAppStatus(ctx, agentsdk.PatchAppStatus{
+			AppSlug: "vscode",
+			Message: strings.Repeat("a", 161),
+			URI:     "https://example.com",
+			State:   codersdk.WorkspaceAppStatusStateComplete,
+		})
+		require.ErrorContains(t, err, "Message is too long")
+		var sdkErr *codersdk.Error
+		require.ErrorAs(t, err, &sdkErr)
+		require.Equal(t, http.StatusBadRequest, sdkErr.StatusCode())
 	})
 }
 
@@ -1171,8 +1218,8 @@ func TestWorkspaceAgentContainers(t *testing.T) {
 		}).WithAgent(func(agents []*proto.Agent) []*proto.Agent {
 			return agents
 		}).Do()
-		_ = agenttest.New(t, client.URL, r.AgentToken, func(opts *agent.Options) {
-			opts.ContainerLister = agentcontainers.NewDocker(agentexec.DefaultExecer)
+		_ = agenttest.New(t, client.URL, r.AgentToken, func(o *agent.Options) {
+			o.ExperimentalDevcontainersEnabled = true
 		})
 		resources := coderdtest.NewWorkspaceAgentWaiter(t, client, r.Workspace.ID).Wait()
 		require.Len(t, resources, 1, "expected one resource")
@@ -1273,8 +1320,9 @@ func TestWorkspaceAgentContainers(t *testing.T) {
 				}).WithAgent(func(agents []*proto.Agent) []*proto.Agent {
 					return agents
 				}).Do()
-				_ = agenttest.New(t, client.URL, r.AgentToken, func(opts *agent.Options) {
-					opts.ContainerLister = mcl
+				_ = agenttest.New(t, client.URL, r.AgentToken, func(o *agent.Options) {
+					o.ExperimentalDevcontainersEnabled = true
+					o.ContainerAPIOptions = append(o.ContainerAPIOptions, agentcontainers.WithLister(mcl))
 				})
 				resources := coderdtest.NewWorkspaceAgentWaiter(t, client, r.Workspace.ID).Wait()
 				require.Len(t, resources, 1, "expected one resource")
@@ -2595,4 +2643,71 @@ func TestAgentConnectionInfo(t *testing.T) {
 	require.Equal(t, "yallah", info.HostnameSuffix)
 	require.True(t, info.DisableDirectConnections)
 	require.True(t, info.DERPForceWebSockets)
+}
+
+func TestReinit(t *testing.T) {
+	t.Parallel()
+
+	db, ps := dbtestutil.NewDB(t)
+	pubsubSpy := pubsubReinitSpy{
+		Pubsub:     ps,
+		subscribed: make(chan string),
+	}
+	client := coderdtest.New(t, &coderdtest.Options{
+		Database: db,
+		Pubsub:   &pubsubSpy,
+	})
+	user := coderdtest.CreateFirstUser(t, client)
+
+	r := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+		OrganizationID: user.OrganizationID,
+		OwnerID:        user.UserID,
+	}).WithAgent().Do()
+
+	pubsubSpy.Mutex.Lock()
+	pubsubSpy.expectedEvent = agentsdk.PrebuildClaimedChannel(r.Workspace.ID)
+	pubsubSpy.Mutex.Unlock()
+
+	agentCtx := testutil.Context(t, testutil.WaitShort)
+	agentClient := agentsdk.New(client.URL)
+	agentClient.SetSessionToken(r.AgentToken)
+
+	agentReinitializedCh := make(chan *agentsdk.ReinitializationEvent)
+	go func() {
+		reinitEvent, err := agentClient.WaitForReinit(agentCtx)
+		assert.NoError(t, err)
+		agentReinitializedCh <- reinitEvent
+	}()
+
+	// We need to subscribe before we publish, lest we miss the event
+	ctx := testutil.Context(t, testutil.WaitShort)
+	testutil.TryReceive(ctx, t, pubsubSpy.subscribed) // Wait for the appropriate subscription
+
+	// Now that we're subscribed, publish the event
+	err := prebuilds.NewPubsubWorkspaceClaimPublisher(ps).PublishWorkspaceClaim(agentsdk.ReinitializationEvent{
+		WorkspaceID: r.Workspace.ID,
+		Reason:      agentsdk.ReinitializeReasonPrebuildClaimed,
+	})
+	require.NoError(t, err)
+
+	ctx = testutil.Context(t, testutil.WaitShort)
+	reinitEvent := testutil.TryReceive(ctx, t, agentReinitializedCh)
+	require.NotNil(t, reinitEvent)
+	require.Equal(t, r.Workspace.ID, reinitEvent.WorkspaceID)
+}
+
+type pubsubReinitSpy struct {
+	pubsub.Pubsub
+	sync.Mutex
+	subscribed    chan string
+	expectedEvent string
+}
+
+func (p *pubsubReinitSpy) Subscribe(event string, listener pubsub.Listener) (cancel func(), err error) {
+	p.Lock()
+	if p.expectedEvent != "" && event == p.expectedEvent {
+		close(p.subscribed)
+	}
+	p.Unlock()
+	return p.Pubsub.Subscribe(event, listener)
 }

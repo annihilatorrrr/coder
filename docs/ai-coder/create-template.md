@@ -2,10 +2,10 @@
 
 > [!NOTE]
 >
-> This functionality is in early access and is evolving rapidly.
+> This functionality is in beta and is evolving rapidly.
 >
-> For now, we recommend testing it in a demo or staging environment,
-> rather than deploying to production.
+> When using any AI tool for development, exercise a level of caution appropriate to your use case and environment.
+> Always review AI-generated content before using it in critical systems.
 >
 > Join our [Discord channel](https://discord.gg/coder) or
 > [contact us](https://coder.com/contact) to get help or share feedback.
@@ -42,8 +42,18 @@ Follow the instructions in the Coder Registry to install the module. Be sure to
 enable the `experiment_use_screen` and `experiment_report_tasks` variables to
 report status back to the Coder control plane.
 
+> [!TIP]
+>
 > Alternatively, you can [use a custom agent](./custom-agents.md) that is
 > not in our registry via MCP.
+
+The module uses `experiment_report_tasks` to stream changes to the Coder dashboard:
+
+```hcl
+# Enable experimental features
+experiment_use_screen   = true # Or use experiment_use_tmux = true to use tmux instead
+experiment_report_tasks = true
+```
 
 ## 3. Confirm tasks are streaming in the Coder UI
 

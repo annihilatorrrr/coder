@@ -1214,8 +1214,8 @@ func (s *MethodTestSuite) TestTemplate() {
 			JobID:          job.ID,
 			TemplateID:     uuid.NullUUID{UUID: t.ID, Valid: true},
 		})
-		dbgen.TemplateVersionTerraformValues(s.T(), db, database.InsertTemplateVersionTerraformValuesByJobIDParams{
-			JobID: job.ID,
+		dbgen.TemplateVersionTerraformValues(s.T(), db, database.TemplateVersionTerraformValue{
+			TemplateVersionID: tv.ID,
 		})
 		check.Args(tv.ID).Asserts(t, policy.ActionRead)
 	}))
@@ -2008,6 +2008,38 @@ func (s *MethodTestSuite) TestWorkspace() {
 		res := dbgen.WorkspaceResource(s.T(), db, database.WorkspaceResource{JobID: b.JobID})
 		agt := dbgen.WorkspaceAgent(s.T(), db, database.WorkspaceAgent{ResourceID: res.ID})
 		check.Args(agt.ID).Asserts(w, policy.ActionRead).Returns(agt)
+	}))
+	s.Run("GetWorkspaceAgentsByWorkspaceAndBuildNumber", s.Subtest(func(db database.Store, check *expects) {
+		u := dbgen.User(s.T(), db, database.User{})
+		o := dbgen.Organization(s.T(), db, database.Organization{})
+		tpl := dbgen.Template(s.T(), db, database.Template{
+			OrganizationID: o.ID,
+			CreatedBy:      u.ID,
+		})
+		tv := dbgen.TemplateVersion(s.T(), db, database.TemplateVersion{
+			TemplateID:     uuid.NullUUID{UUID: tpl.ID, Valid: true},
+			OrganizationID: o.ID,
+			CreatedBy:      u.ID,
+		})
+		w := dbgen.Workspace(s.T(), db, database.WorkspaceTable{
+			TemplateID:     tpl.ID,
+			OrganizationID: o.ID,
+			OwnerID:        u.ID,
+		})
+		j := dbgen.ProvisionerJob(s.T(), db, nil, database.ProvisionerJob{
+			Type: database.ProvisionerJobTypeWorkspaceBuild,
+		})
+		b := dbgen.WorkspaceBuild(s.T(), db, database.WorkspaceBuild{
+			JobID:             j.ID,
+			WorkspaceID:       w.ID,
+			TemplateVersionID: tv.ID,
+		})
+		res := dbgen.WorkspaceResource(s.T(), db, database.WorkspaceResource{JobID: b.JobID})
+		agt := dbgen.WorkspaceAgent(s.T(), db, database.WorkspaceAgent{ResourceID: res.ID})
+		check.Args(database.GetWorkspaceAgentsByWorkspaceAndBuildNumberParams{
+			WorkspaceID: w.ID,
+			BuildNumber: 1,
+		}).Asserts(w, policy.ActionRead).Returns([]database.WorkspaceAgent{agt})
 	}))
 	s.Run("GetWorkspaceAgentLifecycleStateByID", s.Subtest(func(db database.Store, check *expects) {
 		u := dbgen.User(s.T(), db, database.User{})
@@ -3986,8 +4018,9 @@ func (s *MethodTestSuite) TestSystemFunctions() {
 	s.Run("InsertWorkspaceAgent", s.Subtest(func(db database.Store, check *expects) {
 		dbtestutil.DisableForeignKeysAndTriggers(s.T(), db)
 		check.Args(database.InsertWorkspaceAgentParams{
-			ID:   uuid.New(),
-			Name: "dev",
+			ID:          uuid.New(),
+			Name:        "dev",
+			APIKeyScope: database.AgentKeyScopeEnumAll,
 		}).Asserts(rbac.ResourceSystem, policy.ActionCreate)
 	}))
 	s.Run("InsertWorkspaceApp", s.Subtest(func(db database.Store, check *expects) {
@@ -5305,5 +5338,79 @@ func (s *MethodTestSuite) TestResourcesProvisionerdserver() {
 		check.Args(database.InsertWorkspaceAgentDevcontainersParams{
 			WorkspaceAgentID: agt.ID,
 		}).Asserts(rbac.ResourceWorkspaceAgentDevcontainers, policy.ActionCreate)
+	}))
+}
+
+func (s *MethodTestSuite) TestChat() {
+	createChat := func(t *testing.T, db database.Store) (database.User, database.Chat, database.ChatMessage) {
+		t.Helper()
+
+		usr := dbgen.User(t, db, database.User{})
+		chat := dbgen.Chat(s.T(), db, database.Chat{
+			OwnerID: usr.ID,
+		})
+		msg := dbgen.ChatMessage(s.T(), db, database.ChatMessage{
+			ChatID: chat.ID,
+		})
+
+		return usr, chat, msg
+	}
+
+	s.Run("DeleteChat", s.Subtest(func(db database.Store, check *expects) {
+		_, c, _ := createChat(s.T(), db)
+		check.Args(c.ID).Asserts(c, policy.ActionDelete)
+	}))
+
+	s.Run("GetChatByID", s.Subtest(func(db database.Store, check *expects) {
+		_, c, _ := createChat(s.T(), db)
+		check.Args(c.ID).Asserts(c, policy.ActionRead).Returns(c)
+	}))
+
+	s.Run("GetChatMessagesByChatID", s.Subtest(func(db database.Store, check *expects) {
+		_, c, m := createChat(s.T(), db)
+		check.Args(c.ID).Asserts(c, policy.ActionRead).Returns([]database.ChatMessage{m})
+	}))
+
+	s.Run("GetChatsByOwnerID", s.Subtest(func(db database.Store, check *expects) {
+		u1, u1c1, _ := createChat(s.T(), db)
+		u1c2 := dbgen.Chat(s.T(), db, database.Chat{
+			OwnerID:   u1.ID,
+			CreatedAt: u1c1.CreatedAt.Add(time.Hour),
+		})
+		_, _, _ = createChat(s.T(), db) // other user's chat
+		check.Args(u1.ID).Asserts(u1c2, policy.ActionRead, u1c1, policy.ActionRead).Returns([]database.Chat{u1c2, u1c1})
+	}))
+
+	s.Run("InsertChat", s.Subtest(func(db database.Store, check *expects) {
+		usr := dbgen.User(s.T(), db, database.User{})
+		check.Args(database.InsertChatParams{
+			OwnerID:   usr.ID,
+			Title:     "test chat",
+			CreatedAt: dbtime.Now(),
+			UpdatedAt: dbtime.Now(),
+		}).Asserts(rbac.ResourceChat.WithOwner(usr.ID.String()), policy.ActionCreate)
+	}))
+
+	s.Run("InsertChatMessages", s.Subtest(func(db database.Store, check *expects) {
+		usr := dbgen.User(s.T(), db, database.User{})
+		chat := dbgen.Chat(s.T(), db, database.Chat{
+			OwnerID: usr.ID,
+		})
+		check.Args(database.InsertChatMessagesParams{
+			ChatID:    chat.ID,
+			CreatedAt: dbtime.Now(),
+			Model:     "test-model",
+			Provider:  "test-provider",
+			Content:   []byte(`[]`),
+		}).Asserts(chat, policy.ActionUpdate)
+	}))
+
+	s.Run("UpdateChatByID", s.Subtest(func(db database.Store, check *expects) {
+		_, c, _ := createChat(s.T(), db)
+		check.Args(database.UpdateChatByIDParams{
+			ID:        c.ID,
+			Title:     "new title",
+			UpdatedAt: dbtime.Now(),
+		}).Asserts(c, policy.ActionUpdate)
 	}))
 }

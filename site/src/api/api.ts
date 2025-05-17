@@ -221,11 +221,11 @@ export const watchBuildLogsByTemplateVersionId = (
 
 export const watchWorkspaceAgentLogs = (
 	agentId: string,
-	{ after, onMessage, onDone, onError }: WatchWorkspaceAgentLogsOptions,
+	params?: WatchWorkspaceAgentLogsParams,
 ) => {
 	const searchParams = new URLSearchParams({
 		follow: "true",
-		after: after.toString(),
+		after: params?.after?.toString() ?? "",
 	});
 
 	/**
@@ -237,32 +237,14 @@ export const watchWorkspaceAgentLogs = (
 		searchParams.set("no_compression", "");
 	}
 
-	const socket = createWebSocket(
-		`/api/v2/workspaceagents/${agentId}/logs`,
+	return new OneWayWebSocket<TypesGen.WorkspaceAgentLog[]>({
+		apiRoute: `/api/v2/workspaceagents/${agentId}/logs`,
 		searchParams,
-	);
-
-	socket.addEventListener("message", (event) => {
-		const logs = JSON.parse(event.data) as TypesGen.WorkspaceAgentLog[];
-		onMessage(logs);
 	});
-
-	socket.addEventListener("error", () => {
-		onError(new Error("socket errored"));
-	});
-
-	socket.addEventListener("close", () => {
-		onDone?.();
-	});
-
-	return socket;
 };
 
-type WatchWorkspaceAgentLogsOptions = {
-	after: number;
-	onMessage: (logs: TypesGen.WorkspaceAgentLog[]) => void;
-	onDone?: () => void;
-	onError: (error: Error) => void;
+type WatchWorkspaceAgentLogsParams = {
+	after?: number;
 };
 
 type WatchBuildLogsByBuildIdOptions = {
@@ -396,7 +378,17 @@ export class MissingBuildParameters extends Error {
 }
 
 export type GetProvisionerJobsParams = {
-	status?: TypesGen.ProvisionerJobStatus;
+	status?: string;
+	limit?: number;
+	// IDs separated by comma
+	ids?: string;
+};
+
+export type GetProvisionerDaemonsParams = {
+	// IDs separated by comma
+	ids?: string;
+	// Stringified JSON Object
+	tags?: string;
 	limit?: number;
 };
 
@@ -472,10 +464,10 @@ class ApiMethods {
 		return response.data;
 	};
 
-	checkAuthorization = async (
+	checkAuthorization = async <TResponse extends TypesGen.AuthorizationResponse>(
 		params: TypesGen.AuthorizationRequest,
-	): Promise<TypesGen.AuthorizationResponse> => {
-		const response = await this.axios.post<TypesGen.AuthorizationResponse>(
+	) => {
+		const response = await this.axios.post<TResponse>(
 			"/api/v2/authcheck",
 			params,
 		);
@@ -711,22 +703,13 @@ class ApiMethods {
 		return response.data;
 	};
 
-	/**
-	 * @param organization Can be the organization's ID or name
-	 * @param tags to filter provisioner daemons by.
-	 */
 	getProvisionerDaemonsByOrganization = async (
 		organization: string,
-		tags?: Record<string, string>,
+		params?: GetProvisionerDaemonsParams,
 	): Promise<TypesGen.ProvisionerDaemon[]> => {
-		const params = new URLSearchParams();
-
-		if (tags) {
-			params.append("tags", JSON.stringify(tags));
-		}
-
 		const response = await this.axios.get<TypesGen.ProvisionerDaemon[]>(
-			`/api/v2/organizations/${organization}/provisionerdaemons?${params}`,
+			`/api/v2/organizations/${organization}/provisionerdaemons`,
+			{ params },
 		);
 		return response.data;
 	};
@@ -822,6 +805,13 @@ class ApiMethods {
 		params.set("claimField", field);
 		const response = await this.axios.get<readonly string[]>(
 			`/api/v2/settings/idpsync/field-values?${params}`,
+		);
+		return response.data;
+	};
+
+	getDeploymentLLMs = async (): Promise<TypesGen.LanguageModelConfig> => {
+		const response = await this.axios.get<TypesGen.LanguageModelConfig>(
+			"/api/v2/deployment/llms",
 		);
 		return response.data;
 	};
@@ -2445,7 +2435,6 @@ class ApiMethods {
 		const params = new URLSearchParams(
 			labels?.map((label) => ["label", label]),
 		);
-
 		const res =
 			await this.axios.get<TypesGen.WorkspaceAgentListContainersResponse>(
 				`/api/v2/workspaceagents/${agentId}/containers?${params.toString()}`,
@@ -2478,6 +2467,23 @@ class ApiMethods {
 
 	markAllInboxNotificationsAsRead = async () => {
 		await this.axios.put<void>("/api/v2/notifications/inbox/mark-all-as-read");
+	};
+
+	createChat = async () => {
+		const res = await this.axios.post<TypesGen.Chat>("/api/v2/chats");
+		return res.data;
+	};
+
+	getChats = async () => {
+		const res = await this.axios.get<TypesGen.Chat[]>("/api/v2/chats");
+		return res.data;
+	};
+
+	getChatMessages = async (chatId: string) => {
+		const res = await this.axios.get<TypesGen.ChatMessage[]>(
+			`/api/v2/chats/${chatId}/messages`,
+		);
+		return res.data;
 	};
 }
 
@@ -2553,7 +2559,7 @@ interface ClientApi extends ApiMethods {
 	getAxiosInstance: () => AxiosInstance;
 }
 
-export class Api extends ApiMethods implements ClientApi {
+class Api extends ApiMethods implements ClientApi {
 	constructor() {
 		const scopedAxiosInstance = getConfiguredAxiosInstance();
 		super(scopedAxiosInstance);

@@ -13,7 +13,7 @@ import type { MutationOptions, QueryClient, QueryOptions } from "react-query";
 import { delay } from "utils/delay";
 import { getTemplateVersionFiles } from "utils/templateVersion";
 
-export const templateKey = (templateId: string) => ["template", templateId];
+const templateKey = (templateId: string) => ["template", templateId];
 
 export const template = (templateId: string): QueryOptions<Template> => {
 	return {
@@ -56,7 +56,7 @@ const getTemplatesByOrganizationQueryKey = (
 	options?: GetTemplatesOptions,
 ) => [organization, "templates", options?.deprecated];
 
-export const templatesByOrganization = (
+const templatesByOrganization = (
 	organization: string,
 	options: GetTemplatesOptions = {},
 ) => {
@@ -139,9 +139,14 @@ export const templateVersionByName = (
 	};
 };
 
+export const templateVersionsQueryKey = (templateId: string) => [
+	"templateVersions",
+	templateId,
+];
+
 export const templateVersions = (templateId: string) => {
 	return {
-		queryKey: ["templateVersions", templateId],
+		queryKey: templateVersionsQueryKey(templateId),
 		queryFn: () => API.getTemplateVersions(templateId),
 	};
 };
@@ -209,7 +214,7 @@ export const templaceACLAvailable = (
 	};
 };
 
-export const templateVersionExternalAuthKey = (versionId: string) => [
+const templateVersionExternalAuthKey = (versionId: string) => [
 	"templateVersion",
 	versionId,
 	"externalAuth",

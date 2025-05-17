@@ -89,9 +89,9 @@ type Options struct {
 	ServiceBannerRefreshInterval time.Duration
 	BlockFileTransfer            bool
 	Execer                       agentexec.Execer
-	ContainerLister              agentcontainers.Lister
 
 	ExperimentalDevcontainersEnabled bool
+	ContainerAPIOptions              []agentcontainers.Option // Enable ExperimentalDevcontainersEnabled for these to be effective.
 }
 
 type Client interface {
@@ -154,9 +154,6 @@ func New(options Options) Agent {
 	if options.Execer == nil {
 		options.Execer = agentexec.DefaultExecer
 	}
-	if options.ContainerLister == nil {
-		options.ContainerLister = agentcontainers.NoopLister{}
-	}
 
 	hardCtx, hardCancel := context.WithCancel(context.Background())
 	gracefulCtx, gracefulCancel := context.WithCancel(hardCtx)
@@ -192,9 +189,9 @@ func New(options Options) Agent {
 		prometheusRegistry: prometheusRegistry,
 		metrics:            newAgentMetrics(prometheusRegistry),
 		execer:             options.Execer,
-		lister:             options.ContainerLister,
 
 		experimentalDevcontainersEnabled: options.ExperimentalDevcontainersEnabled,
+		containerAPIOptions:              options.ContainerAPIOptions,
 	}
 	// Initially, we have a closed channel, reflecting the fact that we are not initially connected.
 	// Each time we connect we replace the channel (while holding the closeMutex) with a new one
@@ -274,9 +271,10 @@ type agent struct {
 	// labeled in Coder with the agent + workspace.
 	metrics *agentMetrics
 	execer  agentexec.Execer
-	lister  agentcontainers.Lister
 
 	experimentalDevcontainersEnabled bool
+	containerAPIOptions              []agentcontainers.Option
+	containerAPI                     atomic.Pointer[agentcontainers.API] // Set by apiHandler.
 }
 
 func (a *agent) TailnetConn() *tailnet.Conn {
@@ -365,9 +363,11 @@ func (a *agent) runLoop() {
 		if ctx.Err() != nil {
 			// Context canceled errors may come from websocket pings, so we
 			// don't want to use `errors.Is(err, context.Canceled)` here.
+			a.logger.Warn(ctx, "runLoop exited with error", slog.Error(ctx.Err()))
 			return
 		}
 		if a.isClosed() {
+			a.logger.Warn(ctx, "runLoop exited because agent is closed")
 			return
 		}
 		if errors.Is(err, io.EOF) {
@@ -1048,7 +1048,11 @@ func (a *agent) run() (retErr error) {
 		return a.statsReporter.reportLoop(ctx, aAPI)
 	})
 
-	return connMan.wait()
+	err = connMan.wait()
+	if err != nil {
+		a.logger.Info(context.Background(), "connection manager errored", slog.Error(err))
+	}
+	return err
 }
 
 // handleManifest returns a function that fetches and processes the manifest
@@ -1087,6 +1091,8 @@ func (a *agent) handleManifest(manifestOK *checkpoint) func(ctx context.Context,
 		if err != nil {
 			return xerrors.Errorf("expand directory: %w", err)
 		}
+		// Normalize all devcontainer paths by making them absolute.
+		manifest.Devcontainers = agentcontainers.ExpandAllDevcontainerPaths(a.logger, expandPathToAbs, manifest.Devcontainers)
 		subsys, err := agentsdk.ProtoFromSubsystems(a.subsystems)
 		if err != nil {
 			a.logger.Critical(ctx, "failed to convert subsystems", slog.Error(err))
@@ -1129,7 +1135,7 @@ func (a *agent) handleManifest(manifestOK *checkpoint) func(ctx context.Context,
 			)
 			if a.experimentalDevcontainersEnabled {
 				var dcScripts []codersdk.WorkspaceAgentScript
-				scripts, dcScripts = agentcontainers.ExtractAndInitializeDevcontainerScripts(a.logger, expandPathToAbs, manifest.Devcontainers, scripts)
+				scripts, dcScripts = agentcontainers.ExtractAndInitializeDevcontainerScripts(manifest.Devcontainers, scripts)
 				// See ExtractAndInitializeDevcontainerScripts for motivation
 				// behind running dcScripts as post start scripts.
 				scriptRunnerOpts = append(scriptRunnerOpts, agentscripts.WithPostStartScripts(dcScripts...))
@@ -1170,6 +1176,12 @@ func (a *agent) handleManifest(manifestOK *checkpoint) func(ctx context.Context,
 				}
 				a.metrics.startupScriptSeconds.WithLabelValues(label).Set(dur)
 				a.scriptRunner.StartCron()
+				if containerAPI := a.containerAPI.Load(); containerAPI != nil {
+					// Inform the container API that the agent is ready.
+					// This allows us to start watching for changes to
+					// the devcontainer configuration files.
+					containerAPI.SignalReady()
+				}
 			})
 			if err != nil {
 				return xerrors.Errorf("track conn goroutine: %w", err)
@@ -1481,8 +1493,13 @@ func (a *agent) createTailnet(
 	}()
 	if err = a.trackGoroutine(func() {
 		defer apiListener.Close()
+		apiHandler, closeAPIHAndler := a.apiHandler()
+		defer func() {
+			_ = closeAPIHAndler()
+		}()
 		server := &http.Server{
-			Handler:           a.apiHandler(),
+			BaseContext:       func(net.Listener) context.Context { return ctx },
+			Handler:           apiHandler,
 			ReadTimeout:       20 * time.Second,
 			ReadHeaderTimeout: 20 * time.Second,
 			WriteTimeout:      20 * time.Second,
@@ -1493,6 +1510,7 @@ func (a *agent) createTailnet(
 			case <-ctx.Done():
 			case <-a.hardCtx.Done():
 			}
+			_ = closeAPIHAndler()
 			_ = server.Close()
 		}()
 
